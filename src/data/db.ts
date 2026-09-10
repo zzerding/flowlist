@@ -28,6 +28,7 @@ db.version(1).stores({
 export const META_KEYS = {
   schemaVersion: "schemaVersion",
   lastFocus: "lastFocus",
+  lastScrollTop: "lastScrollTop",
   searchIndexVersion: "searchIndexVersion",
 } as const
 

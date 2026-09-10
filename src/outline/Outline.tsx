@@ -1,6 +1,6 @@
 import { useAtomValue, useAtomSet } from "@effect/atom-react"
 import { useVirtualizer } from "@tanstack/react-virtual"
-import { useCallback, useRef } from "react"
+import { useCallback, useEffect, useRef } from "react"
 
 import { ActiveEditor } from "../editor/ActiveEditor"
 import { StaticContent } from "../editor/staticRenderer"
@@ -8,6 +8,7 @@ import type { NodeRecord } from "../domain/nodeRecord"
 import { validateContent } from "../editor/staticRenderer"
 import { activeEditAtom, expandedNoteAtom, nodesAtom, visibleRowsAtom, type ActiveEdit } from "../state/outlineState"
 import { runtime, DataStore } from "../app/runtime"
+import { consumePendingScrollRestore, rememberScrollPosition } from "../app/App"
 import { measure, mark } from "../telemetry/metrics"
 
 /**
@@ -27,6 +28,20 @@ export function Outline() {
   const setExpandedNote = useAtomSet(expandedNoteAtom)
 
   const scrollRef = useRef<HTMLDivElement>(null)
+
+  // 恢复滚动位置 + 卸载/刷新时持久化（决策记录第 6 条）
+  useEffect(() => {
+    const el = scrollRef.current
+    if (!el) return
+    const saved = consumePendingScrollRestore()
+    if (saved !== null) el.scrollTop = saved
+    const onScroll = () => rememberScrollPosition(el.scrollTop)
+    el.addEventListener("scroll", onScroll, { passive: true })
+    return () => {
+      el.removeEventListener("scroll", onScroll)
+      onScroll()
+    }
+  }, [])
 
   const virtualizer = useVirtualizer({
     count: rows.length,
