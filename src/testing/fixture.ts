@@ -28,7 +28,8 @@ export const seedFixtureToDexie = (options?: {
       try: () => db.meta.put({ key: META_KEYS.schemaVersion, value: 1 }),
       catch: (error) => new Error(`fixture meta 写入失败: ${String(error)}`),
     })
-    return { nodes: nodes.length, bytes }
+    const result = { nodes: nodes.length, bytes }
+    return result
   })
 
 /** 浏览器侧注入入口（addInitScript 中引用编译后的纯函数）。 */

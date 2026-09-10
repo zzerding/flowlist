@@ -250,6 +250,9 @@ export const generateSeed = (options: SeedOptions = {}): SeedResult => {
   // depth1 宿主占位（宽/巨分支宿主）
   for (let i = 0; i < minDepth1; i++) {
     structure.push({ id: `n${i}`, parentId: ROOT_ID, depth: 1 })
+    const siblings = nodesAtDepth.get(1) ?? []
+    siblings.push(`n${i}`)
+    nodesAtDepth.set(1, siblings)
   }
 
   const countsAtDepth = new Map<number, number>()
