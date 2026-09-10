@@ -55,4 +55,8 @@ declare const __SEED_BYTES__: number
   })
   ;(window as unknown as Record<string, unknown>).__flowlistSeedCount = nodes.length
   localStorage.setItem("flowlistSeedDone", String(nodes.length))
+  // 关键：释放原生连接。不 close 会让应用侧 Dexie 的 open 请求被 block
+  //（实测表现为「Upgrade 'flowlist' blocked by other connection holding version 0.1」警告，
+  // 后续 reload 时应用加载卡死）。这是 e2e/README.md 记录的坑之一。
+  db.close()
 })()
