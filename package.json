@@ -28,10 +28,14 @@
   },
   "dependencies": {
     "@effect/atom-react": "4.0.0-rc.112",
+    "@lexical/history": "0.50.0",
+    "@lexical/react": "0.50.0",
+    "@tanstack/react-virtual": "3.14.11",
     "dexie": "^4.4.5",
     "effect": "4.0.0-rc.112",
     "flexsearch": "^0.8.212",
     "fractional-indexing": "^4.0.0",
+    "lexical": "0.50.0",
     "react": "^19.2.8",
     "react-dom": "^19.2.8"
   }
