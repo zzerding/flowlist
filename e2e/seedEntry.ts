@@ -8,6 +8,13 @@ declare const __SEED_COUNT__: number
 declare const __SEED_BYTES__: number
 
 ;(window as unknown as Record<string, unknown>).__flowlistSeedReady = (async () => {
+  // 已写入过则跳过（addInitScript 在每次导航都会执行；
+  // 性能采样需要「数据已持久化」的已缓存启动，不应每次 reload 重建 50MB）
+  if (localStorage.getItem("flowlistSeedDone")) {
+    ;(window as unknown as Record<string, unknown>).__flowlistSeedCount = -1
+    return
+  }
+
   const { nodes } = generateSeed({ nodeCount: __SEED_COUNT__, targetBytes: __SEED_BYTES__ })
 
   // addInitScript 阶段应用尚未打开 Dexie：这里自建库与表（与 src/data/db.ts v1 schema 一致）
@@ -47,4 +54,5 @@ declare const __SEED_BYTES__: number
     tx.onerror = () => reject(tx.error)
   })
   ;(window as unknown as Record<string, unknown>).__flowlistSeedCount = nodes.length
+  localStorage.setItem("flowlistSeedDone", String(nodes.length))
 })()
