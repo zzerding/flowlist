@@ -35,7 +35,21 @@ seed 的体积校准阶段会向个别节点（小规模下是 `n0`/`n1`）追�
 **正确用法**：交互类采样（启动点击、输入、保存）先用黑盒过滤选中「文本较短」的静态行
 （`performance.perf.ts` 的 `findCalmRowIndex`：`textContent.length` 2–80）。
 
-### 3. 单独跑 vs 一起跑的耗时差异巨大
+### 3. seed 脚本写完必须 `db.close()` 释放原生连接
+
+`seedEntry.ts` 用原生 `indexedDB.open` 写数据。若不 close,应用侧 Dexie 的连接请求会被阻塞
+（控制台表现:`Upgrade 'flowlist' blocked by other connection holding version 0.1`），
+后续导航应用加载可能卡死、`waitForFunction` 挂到 test timeout 且无法恢复。
+写完（含 `__flowlistSeedCount` 哨兵与 localStorage 标记之后）统一 `db.close()`。
+
+### 4. 不要用模块级 flag 跨 test 判断「已 seed」
+
+Playwright 默认每 test 一个新 context,localStorage/IndexedDB 全空。
+`performance.perf.ts` 曾用 `let seeded = false` 跳过后续 test 的 `addInitScript`,
+导致后续 test 等待一个永远不会出现的哨兵值而卡死（单跑通过、全套跑挂死的典型症状）。
+正确做法:每个 test 都注入 seed 脚本,由 seedEntry 的 localStorage 守卫在同 context 内去重。
+
+### 5. 单独跑 vs 一起跑的耗时差异巨大
 
 - 单个门禁用例（小规模冒烟）：搜索门禁 9.7s、保存门禁 ~1min 即可出 P50/P95。
 - 全套一起跑：受 seed 重建与 reload 轮数影响，分钟到十分钟级。
@@ -43,7 +57,7 @@ seed 的体积校准阶段会向个别节点（小规模下是 `n0`/`n1`）追�
   **门禁判定本身必须用全量数据（100k/50MB）+ 完整样本数**，小规模冒烟只验证 harness，
   其数值不得作为门禁结论。
 
-### 4. PerformanceEventTiming 默认阈值陷阱（测量契约缺口，已报 issue #2）
+### 6. PerformanceEventTiming 默认阈值陷阱（测量契约缺口，已报 issue #2）
 
 Chromium 默认只暴露 `duration ≥ 104ms` 的 event timing entry（MDN：
 rounded to nearest multiple of 8ms）。`src/telemetry/metrics.ts` 的
