@@ -72,9 +72,18 @@ rounded to nearest multiple of 8ms）。`src/telemetry/metrics.ts` 的
 # 单测层（秒级）：接缝 1/2
 pnpm test -- --run
 
-# 单个门禁用例（先冒烟 harness）
-pnpm exec playwright test e2e/performance.perf.ts --project=performance --grep "搜索"
-
-# 全量门禁（最终判定，100k/50MB）
+# 日常 e2e（秒级）：acceptance 冒烟；性能门禁默认 skipped
 pnpm e2e
+
+# 单个门禁用例（先冒烟 harness，需 PERF_FULL=1）
+PERF_FULL=1 pnpm exec playwright test e2e/performance.perf.ts --project=performance --grep "搜索"
+
+# 全量门禁（正式判定，100k/50MB，约 10-15min；启动门禁单样本含 ~97s 索引阻塞，50 样本轮耗时长）
+PERF_FULL=1 pnpm e2e --project=performance
 ```
+
+## 已知门禁现状（2026-09 全量实测，测试报告详情见 issue #2）
+
+- 启动门禁红：单样本 startup ≈ 100s（数据加载 ~3s + FlexSearch 全量索引阻塞主线程 ~97s），
+  门禁 1s。采样成本高（每样本 ~100s），因此门禁按需执行，不随日常 e2e 跑。
+- 结构操作门禁 skipped：原型未实现新增/删除/移动命令，`flowlist:structure` 无数据源。

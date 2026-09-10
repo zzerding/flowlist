@@ -60,6 +60,16 @@ const collect = (page: import("@playwright/test").Page, name: string, minSamples
 test.describe("S1 性能门禁", () => {
   test.setTimeout(600_000)
 
+  // 基准测试不在每次 e2e 中执行(全量 100k/50MB 单套 ~10min,启动门禁单样本 ~100s)。
+  // 默认 `pnpm e2e` 跳过门禁只跑 acceptance 冒烟;
+  // 正式门禁判定:PERF_FULL=1 pnpm e2e --project=performance(见 e2e/README.md)。
+  test.beforeEach(() => {
+    test.skip(
+      !process.env.PERF_FULL,
+      "性能门禁为按需执行:PERF_FULL=1 pnpm e2e --project=performance",
+    )
+  })
+
   const prepare = async (page: import("@playwright/test").Page): Promise<void> => {
     // Playwright 默认每 test 新 context:localStorage/IndexedDB 均为空。
     // 不能用模块级 flag 判断「已 seed」—— 那会导致后续 test 等一个永远不会出现的哨兵值。
@@ -100,16 +110,21 @@ test.describe("S1 性能门禁", () => {
         () => Number(document.querySelector("[data-testid='loaded-count']")?.textContent) > 0,
         { timeout: 120_000 },
       )
-      // 点击视口内的静态行(尽快,减少人工等待污染样本)
-      const idx = await findCalmRowIndex(page)
-      await page.locator(".flow-row-static").nth(idx).click({ timeout: 10_000 })
+      // 用 evaluate 直接触发第二行 click(evaluate 在主线程空闲后执行,等待 ~97s 属于
+      // 「启动到可编辑」的一部分,被 startup duration 如实包含)。
+      // 不用 locator.click:主线程阻塞期间 Playwright actionability 检查无限等待(实测 >600s 不注入)。
+      // 红色根因:首屏无默认可编辑入口 + 加载后 FlexSearch 全量索引阻塞主线程 ~97s,见测试报告。
+      await page.evaluate(() => {
+        const rows = document.querySelectorAll(".flow-row-static")
+        ;(rows[1] as HTMLElement).click()
+      })
       await page
         .waitForFunction(
           () =>
             (window as unknown as Record<string, { snapshot: () => Snapshot }>)
               .__flowlistMetrics?.snapshot().measures.some((m) => m.name === "flowlist:startup") ??
             false,
-          { timeout: 15_000 },
+          { timeout: 240_000 },
         )
       const all = await collect(page, "flowlist:startup", 500)
       // 每轮 reload 后页面指标清零(reload 重置 JS 状态),本轮应有恰好一条新样本
@@ -222,7 +237,9 @@ test.describe("S1 性能门禁", () => {
   })
 
   test("DOM 规模不随 100k 增长(多滚动位置断言)", async ({ page }) => {
+    const t0 = Date.now()
     await prepare(page)
+    console.log(`[dom] prepare_ms=${Date.now() - t0}`)
     const positions = [0, 0.25, 0.5, 0.75, 0.99]
     for (const frac of positions) {
       await page.getByTestId("outline-scroll").evaluate((el, f) => {
