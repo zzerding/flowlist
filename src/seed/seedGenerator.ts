@@ -198,6 +198,8 @@ const makeBlock = (rand: Rand, type: NodeType, text: string): InlineNodeContaine
 interface InlineNodeContainer {
   type: string
   version: number
+  tag?: string
+  checked?: boolean | null
   children: InlineNode[]
 }
 
