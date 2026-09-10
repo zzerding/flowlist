@@ -43,17 +43,23 @@ export const mark = (name: string): void => {
 export const measure = (name: string, startMark: string, endMark?: string): void => {
   if (typeof performance === "undefined") return
   const end = endMark ?? `${name}:end`
+  let duration: number | undefined
   try {
-    performance.measure(name, startMark, end)
+    performance.mark(end)
+    const perfMeasure = performance.measure(name, startMark, end)
+    duration = perfMeasure?.duration
   } catch {
     return
   }
-  const entries = performance.getEntriesByName(name)
-  const last = entries[entries.length - 1]
-  if (last) {
+  if (duration === undefined) {
+    const entries = performance.getEntriesByName(name)
+    const last = entries[entries.length - 1]
+    duration = last?.duration
+  }
+  if (duration !== undefined) {
     measureSamples.push({
       name,
-      durationMs: last.duration,
+      durationMs: duration,
       timestamp: performance.now(),
     })
     if (measureSamples.length > MAX_SAMPLES) measureSamples.shift()

@@ -27,6 +27,8 @@ export interface ActiveEditorProps {
   onCommitHistory: () => void
   /** 字段标签（title/note），供测试与无障碍。 */
   fieldLabel: string
+  /** 挂载后聚焦编辑器（切换节点/键盘焦点交接）。 */
+  autoFocus?: boolean
 }
 
 /** 把 Schema 校验过的 JSON 子集转成 Lexical 可解析的 SerializedEditorState。 */
@@ -35,7 +37,7 @@ const toSerializedState = (content: LexicalContent | null): SerializedEditorStat
   return content as unknown as SerializedEditorState
 }
 
-export function ActiveEditor({ initialContent, onChange, onCommitHistory, fieldLabel }: ActiveEditorProps) {
+export function ActiveEditor({ initialContent, onChange, onCommitHistory, fieldLabel, autoFocus }: ActiveEditorProps) {
   const initialConfig = {
     namespace: "flowlist",
     editable: true,
@@ -59,8 +61,11 @@ export function ActiveEditor({ initialContent, onChange, onCommitHistory, fieldL
     if (editor) {
       editor.dispatchCommand(CLEAR_HISTORY_COMMAND, undefined)
       historyClearRef.current()
+      if (autoFocus) {
+        editor.focus()
+      }
     }
-  }, [initialContent])
+  }, [initialContent, autoFocus])
 
   return (
     <LexicalComposer initialConfig={initialConfig}>
@@ -97,6 +102,7 @@ function CommitOnChange({
   }, [editor, editorRef])
   return (
     <OnChangePlugin
+      ignoreHistoryMergeTagChange={false}
       onChange={(editorState) => {
         onChange(editorState.toJSON())
       }}

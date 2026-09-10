@@ -29,18 +29,23 @@ export function Outline() {
 
   const scrollRef = useRef<HTMLDivElement>(null)
 
-  // 恢复滚动位置 + 卸载/刷新时持久化（决策记录第 6 条）
+  // 恢复滚动位置 + 卸载/刷新时持久化（决策记录第 6 条）。
+  // 数据异步加载，等首行渲染后再恢复（否则消费时机早于 offer）。
+  const hasRows = rows.length > 0
   useEffect(() => {
+    if (!hasRows) return
     const el = scrollRef.current
     if (!el) return
     const saved = consumePendingScrollRestore()
     if (saved !== null) el.scrollTop = saved
+  }, [hasRows])
+
+  useEffect(() => {
+    const el = scrollRef.current
+    if (!el) return
     const onScroll = () => rememberScrollPosition(el.scrollTop)
     el.addEventListener("scroll", onScroll, { passive: true })
-    return () => {
-      el.removeEventListener("scroll", onScroll)
-      onScroll()
-    }
+    return () => el.removeEventListener("scroll", onScroll)
   }, [])
 
   const virtualizer = useVirtualizer({
@@ -106,10 +111,11 @@ export function Outline() {
               className="flow-row"
               style={{
                 position: "absolute",
-                top: 0,
+                top: item.start,
                 left: 0,
                 width: "100%",
-                height: noteExpanded ? undefined : ROW_HEIGHT,
+                minHeight: ROW_HEIGHT,
+                height: noteExpanded ? "auto" : ROW_HEIGHT,
                 paddingLeft: row.depth * 20,
               }}
             >
@@ -123,6 +129,7 @@ export function Outline() {
                   onCommitHistory={() => {
                     // Lexical 历史作废（补丁交接进应用栈，决策记录第 2 条）
                   }}
+                  autoFocus
                 />
               ) : (
                 <div
@@ -166,6 +173,7 @@ const extractText = (state: unknown): string => {
       const obj = n as Record<string, unknown>
       if (typeof obj.text === "string") out.push(obj.text)
       if (Array.isArray(obj.children)) walk(obj.children)
+      if (obj.root !== undefined) walk(obj.root)
     }
   }
   walk(state)
