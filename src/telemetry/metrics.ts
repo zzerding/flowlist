@@ -81,7 +81,9 @@ export const startEventTimingCollection = (): void => {
         }
       }
     })
-    observer.observe({ type: "event", buffered: true } as PerformanceObserverInit)
+    // durationThreshold 16ms：Chromium 默认仅暴露 ≥104ms 的事件（spec 下限 16ms），
+    // 不设阈值则 16ms 级输入完全不产生样本，输入门禁无法按测量契约采样。
+    observer.observe({ type: "event", durationThreshold: 16, buffered: true } as PerformanceObserverInit)
     eventTimingObserverStarted = true
   } catch {
     // PerformanceEventTiming 不可用时静默降级（不影响功能）

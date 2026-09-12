@@ -14,9 +14,18 @@ importers:
       '@lexical/history':
         specifier: 0.50.0
         version: 0.50.0(typescript@5.9.3)
+      '@lexical/link':
+        specifier: 0.50.0
+        version: 0.50.0(typescript@5.9.3)
+      '@lexical/list':
+        specifier: 0.50.0
+        version: 0.50.0(typescript@5.9.3)
       '@lexical/react':
         specifier: 0.50.0
         version: 0.50.0(react-dom@19.2.8(react@19.2.8))(react@19.2.8)(typescript@5.9.3)(yjs@13.6.32)
+      '@lexical/rich-text':
+        specifier: 0.50.0
+        version: 0.50.0(typescript@5.9.3)
       '@tanstack/react-virtual':
         specifier: 3.14.11
         version: 3.14.11(react-dom@19.2.8(react@19.2.8))(react@19.2.8)

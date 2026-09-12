@@ -13,6 +13,8 @@ export class StoreError extends Schema.TaggedError<StoreError>()("DataStoreError
  * Worker 协议归 issue #3；这里的方法签名保持可平移到 Worker 请求。
  */
 export class DataStore extends Context.Service<DataStore, {
+  /** 单节点读取（保存冲突时重取当前数据，原型从简）。 */
+  readonly getNode: (id: string) => Effect.Effect<NodeRecord | null, StoreError>
   /** 编辑补丁直写（决策记录第 6 条），返回新 revision。 */
   readonly patchNode: (
     id: string,
@@ -29,6 +31,12 @@ export class DataStore extends Context.Service<DataStore, {
 }>()("flowlist/DataStore") {}
 
 const storeShape = {
+  getNode: (id: string) =>
+    Effect.tryPromise({
+      try: () => db.nodes.get(id).then((node) => node ?? null),
+      catch: (error) => new StoreError({ cause: String(error) }),
+    }),
+
   patchNode: (id: string, fields: Partial<NodeRecord>, expectedRevision: number) =>
     Effect.tryPromise({
       try: async () => {

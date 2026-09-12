@@ -6,6 +6,9 @@ import { OnChangePlugin } from "@lexical/react/LexicalOnChangePlugin"
 import { LexicalErrorBoundary } from "@lexical/react/LexicalErrorBoundary"
 import { HistoryPlugin } from "@lexical/react/LexicalHistoryPlugin"
 import { useLexicalComposerContext } from "@lexical/react/LexicalComposerContext"
+import { LinkNode } from "@lexical/link"
+import { ListItemNode, ListNode } from "@lexical/list"
+import { HeadingNode, QuoteNode } from "@lexical/rich-text"
 import { useEffect, useRef } from "react"
 
 import type { LexicalContent } from "../domain/nodeRecord"
@@ -15,8 +18,12 @@ import type { LexicalContent } from "../domain/nodeRecord"
  *
  * - 单 contenteditable，在节点/字段间切换（切 host 不切实例）；
  * - 载入目标节点字段的 EditorState；提交后清空 Lexical 历史（撤销交接）；
+ * - 注册 seed/编辑产出涉及的全部节点类型（heading/quote/listitem/link），
+ *   否则含这些类型的行激活时抛 Lexical error #17（节点未注册）；
  * - 中文 IME 依赖 Lexical 原生 composition 处理（不做拦截）。
  */
+
+const EDITOR_NODES = [HeadingNode, QuoteNode, ListNode, ListItemNode, LinkNode]
 
 export interface ActiveEditorProps {
   /** 初始内容（经 Schema 校验的 Lexical JSON 子集）。 */
@@ -41,6 +48,7 @@ export function ActiveEditor({ initialContent, onChange, onCommitHistory, fieldL
   const initialConfig = {
     namespace: "flowlist",
     editable: true,
+    nodes: EDITOR_NODES,
     editorState: (editor: LexicalEditor) => {
       const serialized = toSerializedState(initialContent)
       if (serialized) {

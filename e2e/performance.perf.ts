@@ -58,7 +58,9 @@ const collect = (page: import("@playwright/test").Page, name: string, minSamples
   )
 
 test.describe("S1 性能门禁", () => {
-  test.setTimeout(600_000)
+  // 50 样本轮次每轮含 100k 数据加载（秒级）× reload，总耗时超过 10min，
+  // 放宽到 30min（测量 harness 配置，非门禁阈值）。
+  test.setTimeout(1_800_000)
 
   // 基准测试不在每次 e2e 中执行(全量 100k/50MB 单套 ~10min,启动门禁单样本 ~100s)。
   // 默认 `pnpm e2e` 跳过门禁只跑 acceptance 冒烟;
@@ -99,8 +101,11 @@ test.describe("S1 性能门禁", () => {
 
   test("启动到首屏可编辑 P95 ≤1s(50 样本)", async ({ page }) => {
     await prepare(page)
-    // 采样方式:每次加载后尽快点击一行(首屏唯一 contenteditable 随活动编辑器出现),
-    // recordStartup 由实现侧在 editor 挂载时结算;duration 覆盖 init→editor 挂载全程。
+    // 首屏默认可编辑入口已实现（幽灵活动行，修复项 4）：加载后无需任何交互，
+    // recordStartup 即在 ghost 编辑器挂载时结算 flowlist:startup。
+    // （原流程每轮点击 rows[1] 触发编辑器挂载，是「无默认可编辑入口」时的
+    // 临时采样手段；rows[1] 是 seed 校准节点，点击会触发分钟级主线程阻塞，
+    // 详见 e2e/README.md 坑 2 —— 该 workaround 随修复移除。）
     const samples: number[] = []
     const ROUNDS = 50
     const MAX_ROUNDS = 80 // 允许少量轮次未产生样本(编辑器未挂载等),补足 50 样本
@@ -110,14 +115,6 @@ test.describe("S1 性能门禁", () => {
         () => Number(document.querySelector("[data-testid='loaded-count']")?.textContent) > 0,
         { timeout: 120_000 },
       )
-      // 用 evaluate 直接触发第二行 click(evaluate 在主线程空闲后执行,等待 ~97s 属于
-      // 「启动到可编辑」的一部分,被 startup duration 如实包含)。
-      // 不用 locator.click:主线程阻塞期间 Playwright actionability 检查无限等待(实测 >600s 不注入)。
-      // 红色根因:首屏无默认可编辑入口 + 加载后 FlexSearch 全量索引阻塞主线程 ~97s,见测试报告。
-      await page.evaluate(() => {
-        const rows = document.querySelectorAll(".flow-row-static")
-        ;(rows[1] as HTMLElement).click()
-      })
       await page
         .waitForFunction(
           () =>
@@ -146,11 +143,15 @@ test.describe("S1 性能门禁", () => {
     await page.waitForTimeout(500)
     const editor = page.locator("[data-testid='active-editor']")
     await editor.click()
-    // 样本足够:逐键输入,每键一个 save 样本;不足 50 则再补一轮
+    // 样本足够：逐键输入。实现侧编辑补丁按架构 §9 合并窗口（100ms）提交，
+    // 连续无间隔输入会合并为一次提交；键间加 150ms 间隔让每键独立成命令，
+    // 一轮 60 键即产出 ≥50 个 save 样本（pacing 调整，非门禁阈值变更）。
     const typeKeys = async (): Promise<void> => {
       for (let i = 0; i < 30; i++) {
         await page.keyboard.type("测")
+        await page.waitForTimeout(150)
         await page.keyboard.press("Backspace")
+        await page.waitForTimeout(150)
       }
     }
     await typeKeys()
@@ -190,50 +191,34 @@ test.describe("S1 性能门禁", () => {
     expect(p95).toBeLessThanOrEqual(100)
   })
 
-  test("连续输入延迟 P95 ≤16ms(测试侧 rAF 黑盒采样,60 样本)", async ({ page }) => {
+  test("连续输入延迟 P95 ≤16ms(ET durationThreshold=16 契约采样)", async ({ page }) => {
     await prepare(page)
-    // 测量契约:输入用 PerformanceEventTiming duration。但 Chromium 默认只在 duration ≥104ms
-    // 时暴露 ET entry(可通过 durationThreshold 降低,spec 下限 16ms),16ms 级输入完全无样本
-    // —— 实现侧 metrics.ts 未设置 durationThreshold,见测试报告「测量缺口」。
-    // 这里用测试侧黑盒近似:keydown → 输入事件处理后下一帧绘制(rAF)的间隔。
+    // 测量契约：输入用 PerformanceEventTiming duration。
+    // 实现侧 metrics.ts 已设 durationThreshold: 16（Chromium 默认 104ms，
+    // 16ms 级输入无样本，修复记录见 e2e/README.md）。注意 ET 只上报 ≥16ms
+    // 的事件：样本集合即「≥16ms 的输入事件」，P95 ≤16 等价于
+    // 「≥16ms 的事件中 ≥95% 不到 24ms」；完全无样本说明所有输入 <16ms。
     await page.locator(".flow-row-static").nth(await findCalmRowIndex(page)).click()
     await page.waitForTimeout(500)
     await page.locator("[data-testid='active-editor']").click()
-    await page.evaluate(() => {
-      const w = window as unknown as Record<string, unknown>
-      w.__inputLatencies = [] as number[]
-      let keydownAt: number | null = null
-      document.addEventListener(
-        "keydown",
-        () => {
-          if (keydownAt === null) {
-            keydownAt = performance.now()
-            requestAnimationFrame(() => {
-              requestAnimationFrame(() => {
-                const lat = (w.__inputLatencies as number[])
-                if (keydownAt !== null) lat.push(performance.now() - keydownAt)
-                keydownAt = null
-              })
-            })
-          }
-        },
-        true,
-      )
-    })
+    // 连续输入（不加人工间隔，与既有用例采样节奏一致）：逐键间隔 <16ms 时
+    // 事件相位聚合，ET（durationThreshold=16，只上报 ≥16ms 的事件）样本集
+    // 即「错过一帧绘制」的事件，更能反映真实最坏情况。
     for (let i = 0; i < 120; i++) {
       await page.keyboard.type("字")
       await page.keyboard.press("Backspace")
-      await page.waitForTimeout(20)
     }
-    const samples = await page.evaluate(() => (window as unknown as Record<string, number[]>).__inputLatencies!)
-    const recent = samples.slice(-100)
+    const samples = await page.evaluate(() =>
+      (
+        window as unknown as { __flowlistMetrics?: { snapshot: () => Snapshot } }
+      ).__flowlistMetrics!.snapshot().eventTimings,
+    )
+    const recent = samples.slice(-200)
     const p50 = percentile(recent, 50)
     const p95 = percentile(recent, 95)
-    console.log(`[typing rAF] n=${recent.length} P50=${p50.toFixed(1)}ms P95=${p95.toFixed(1)}ms`)
-    // rAF 差值法包含固定的一帧渲染预算(16.7ms),且采样含两个 rAF tick,
-    // 实测 P95 稳定落在 30–35ms(两帧边界抖动)。以两帧 34ms 为近似上限,
-    // 并在报告中如实标注:绝对 16ms 门禁须等实现侧 ET durationThreshold 修复后用契约方法复测。
-    expect(p95).toBeLessThanOrEqual(34)
+    console.log(`[typing ET] n=${recent.length} P50=${p50.toFixed(1)}ms P95=${p95.toFixed(1)}ms`)
+    expect(recent.length).toBeGreaterThan(0)
+    expect(p95).toBeLessThanOrEqual(16)
   })
 
   test("DOM 规模不随 100k 增长(多滚动位置断言)", async ({ page }) => {

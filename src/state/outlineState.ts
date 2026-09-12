@@ -66,9 +66,5 @@ export const expandedNoteAtom = Atom.make<string | null>(null)
 /** 内存节点表（启动时从 Dexie 加载，补丁乐观更新）。 */
 export const nodesAtom = Atom.make<ReadonlyMap<string, NodeRecord>>(new Map())
 
-/** 可视行派生：由 nodesAtom 展开。 */
-export const visibleRowsAtom = Atom.make((get): Array<VisibleRow> => {
-  const nodes = get(nodesAtom)
-  const childrenOf = buildChildrenIndex([...nodes.values()])
-  return flattenVisible(childrenOf)
-})
+/** 首屏行表：加载时由 buildChildrenIndex + flattenVisible 派生一次（App 启动时写入）。 */
+export const outlineRowsAtom = Atom.make<ReadonlyArray<VisibleRow>>([])
