@@ -13,6 +13,20 @@ export const TARGET_NODE_COUNT = 100_000
 export const TARGET_BYTES = 50 * 1024 * 1024
 export const BYTE_TOLERANCE = 0.05 // ±5%
 
+/**
+ * 冻结密度（架构 §14.1）：每节点平均字节数 = 50MB / 100k ≈ 524 B。
+ * 小规模测试用例必须按此密度等比缩放 targetBytes，否则会要求超出
+ * 冻结字符范围（TEXT/LONG_TEXT/NOTE_CHAR_RANGE）产能的密度 —— 这曾导致
+ * 旧实现用单节点超限 4800 倍的方式硬凑体积（issue #2 已修 bug）。
+ */
+export const TARGET_BYTES_PER_NODE = TARGET_BYTES / TARGET_NODE_COUNT
+
+/**
+ * 单节点字节占总量上限（守卫不变量）。
+ * 真实使用中不存在超大节点；任何节点超过此比例即视为生成器回归。
+ */
+export const MAX_NODE_BYTE_SHARE = 0.01
+
 /** 深度分布：深度 1–3 占 40%、4–6 占 40%、7–10 占 20%（最深 12）。 */
 export const DEPTH_BANDS = [
   { minDepth: 1, maxDepth: 3, weight: 0.4 },
@@ -63,3 +77,10 @@ export const LONG_TEXT_CHAR_RANGE = [400, 1200] as const
 
 /** 普通文本长度范围（字符数），用于标题/备注正文。 */
 export const TEXT_CHAR_RANGE = [2, 24] as const
+
+/**
+ * 备注长度范围（字符数）。
+ * 决策记录第 7 条冻结「备注存在率 30%」并约定备注正文 20–500 字；
+ * 本次显式编码为常量，作为生成与守卫测试的共同依据。
+ */
+export const NOTE_CHAR_RANGE = [20, 500] as const

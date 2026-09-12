@@ -12,7 +12,9 @@ import {
   INLINE_FORMAT_RATIO,
   LANGUAGE_RATIOS,
   LINK_RATIO,
+  LONG_TEXT_CHAR_RANGE,
   LONG_TEXT_RATIO,
+  NOTE_CHAR_RANGE,
   NOTE_RATIO,
   TAG_RATIO,
   TARGET_BYTES,
@@ -78,9 +80,6 @@ const ENGLISH_WORDS = [
 ]
 const EMOJI = ["📌", "🚀", "✅", "💡", "🔥", "🌟", "📝", "🎯", "⚡", "🧠"]
 const TAGS = ["#工作", "#灵感", "#todo", "#project", "#重要"]
-const LONG_TEXT_SENTENCE =
-  "这是一段用于撑大体量的长文本内容，覆盖中文、English words 与 emoji 🎈 的混合场景，" +
-  "确保序列化后字节数达到体积契约要求。"
 
 /** 深度带选择（冻结：1–3 40%、4–6 40%、7–10 20%）。 */
 const depthTarget = (rand: Rand): number => {
@@ -310,6 +309,9 @@ export const generateSeed = (options: SeedOptions = {}): SeedResult => {
   // 预算守恒：普通节点拿 n 字节，长文本节点拿 k×n（长文本溢价 k=10），
   // nodes×(1-r)×n + nodes×r×k×n = targetBytes → n = targetBytes / (nodes×(1-r+r×k))。
   // JSON 结构开销（类型标签等）≈ 200B/节点，从文本预算中扣除。
+  //
+  // 注意：预算只是**初值**，随后会被钳制进冻结的字符范围；总字节缺口由
+  // 第三遍校准按冻结范围轮转吸收（绝不允许堆进单节点）。
   const STRUCTURE_OVERHEAD_BYTES = 200
   const totalNodes = structure.length
   const LONG_TEXT_PREMIUM = 10
@@ -318,11 +320,16 @@ export const generateSeed = (options: SeedOptions = {}): SeedResult => {
     (totalNodes * (1 - LONG_TEXT_RATIO + LONG_TEXT_RATIO * LONG_TEXT_PREMIUM))
   const longTextBudget = normalBudget * LONG_TEXT_PREMIUM
 
+  const clamp = (value: number, min: number, max: number): number =>
+    Math.max(min, Math.min(max, value))
+
   type MutableNode = {
     -readonly [K in keyof NodeRecord]: NodeRecord[K]
   }
 
   const nodes: MutableNode[] = []
+  // 长文本标题节点（校准第二梯队：备注耗尽后仍不足时按冻结范围增长）
+  const longTextIds = new Set<string>()
   let created = 0
 
   for (const s of structure) {
@@ -331,16 +338,26 @@ export const generateSeed = (options: SeedOptions = {}): SeedResult => {
     const budget = isLongText ? longTextBudget : normalBudget
     // 字节数 → 字符数：中文 ≈3 字节/字，混合场景按 2.5 估算
     const budgetChars = Math.floor(budget / 2.5)
+    // 所有文本长度一律钳制进冻结字符范围（旧实现的单节点 13MB 即越界所致）
     const text = isLongText
-      ? makeTextOfLength(rand, Math.max(1, budgetChars))
-      : makeTextOfLength(rand, Math.max(1, Math.min(budgetChars, intBetween(rand, TEXT_CHAR_RANGE[0], TEXT_CHAR_RANGE[1]))))
+      ? makeTextOfLength(rand, clamp(budgetChars, LONG_TEXT_CHAR_RANGE[0], LONG_TEXT_CHAR_RANGE[1]))
+      : makeTextOfLength(
+          rand,
+          intBetween(rand, TEXT_CHAR_RANGE[0], TEXT_CHAR_RANGE[1]),
+        )
+    if (isLongText) longTextIds.add(s.id)
 
     const titleBlock = makeBlock(rand, type, text)
     const title = { root: { type: "root" as const, version: 1, children: [titleBlock] } }
 
     let note: LexicalContent | undefined
     if (rand() < NOTE_RATIO) {
-      const noteText = makeTextOfLength(rand, Math.max(1, Math.floor(budgetChars * 0.3)))
+      const noteChars = clamp(
+        Math.floor(budgetChars * 0.3),
+        NOTE_CHAR_RANGE[0],
+        NOTE_CHAR_RANGE[1],
+      )
+      const noteText = makeTextOfLength(rand, noteChars)
       note = {
         root: {
           type: "root",
@@ -396,30 +413,73 @@ export const generateSeed = (options: SeedOptions = {}): SeedResult => {
   const tolerance = Math.floor(targetBytes * BYTE_TOLERANCE)
   const minBytes = targetBytes - tolerance
   const maxBytes = targetBytes + tolerance
+  // 目标锚在中值而非下边界：冻结字符范围钳制后总量偏小，向上补齐到中值，
+  // 上下各留一半容差，避免贴着 minBytes 抖动。
+  const aimBytes = targetBytes
 
-  if (bytes < minBytes) {
-    // 补齐：往节点追加长段落（不改变既有节点语义，只加大体量）
-    const sentenceUnit = utf8Bytes(LONG_TEXT_SENTENCE)
-    const overheadPerParagraph = utf8Bytes(
-      JSON.stringify({ type: "paragraph", version: 1, children: [{ type: "text", version: 1, text: "" }] }),
-    )
-    let cursor = 0
-    while (bytes < minBytes && cursor < nodes.length * 10) {
-      const node = nodes[cursor % nodes.length]!
-      const remaining = minBytes - bytes
-      const repeats = Math.max(1, Math.floor((remaining - overheadPerParagraph) / sentenceUnit))
-      const text = LONG_TEXT_SENTENCE.repeat(Math.min(repeats, 100_000))
-      const paragraph = {
-        type: "paragraph" as const,
+  // 补齐：所有文本长度被冻结字符范围钳制后总量会偏小，这里均匀分摊吸收缺口。
+  // 旧实现把整个缺口塞进第一个节点（n0 曾达 13MB / 5.8M 字符，超冻结上限 4800 倍），
+  // 而 n0 正是首屏第一行，导致首屏渲染主线程阻塞 ~103s。
+  //
+  // 守恒约束：不改变冻结配比——只动**已有备注**的节点（NOTE_RATIO 不变），
+  // 备注全部拉满后仍不足才动**已有长文本**标题（LONG_TEXT_RATIO 不变）。
+  // 每轮**全体同步**增长（不用 break 提前退出，否则只有前几个节点变大、
+  // 分布双峰），单节点始终受冻结上限约束。
+  const noteNodes = nodes.filter((n) => n.note !== undefined)
+  const longTextNodes = nodes.filter((n) => longTextIds.has(n.id))
+
+  const rewriteNote = (node: MutableNode, chars: number): void => {
+    const text = makeTextOfLength(rand, chars)
+    node.note = {
+      root: {
+        type: "root",
         version: 1,
-        children: [{ type: "text" as const, version: 1, text }],
-      }
-      const title = node.title as unknown as { root: { children: unknown[] } }
-      title.root.children.push(paragraph)
-      node.titleText = lexicalToText(node.title as LexicalContent)
-      bytes += overheadPerParagraph + utf8Bytes(text)
-      cursor++
+        children: [
+          { type: "paragraph", version: 1, children: makeInlineChildren(rand, text, false) },
+        ],
+      },
     }
+    node.noteText = text
+  }
+
+  const rewriteLongTextTitle = (node: MutableNode, chars: number): void => {
+    const title = {
+      root: {
+        type: "root" as const,
+        version: 1,
+        children: [makeBlock(rand, node.type, makeTextOfLength(rand, chars))],
+      },
+    }
+    node.title = title as LexicalContent
+    node.titleText = lexicalToText(title as LexicalContent)
+  }
+
+  /** 把一个字段的长度整体拉高（全体同步、均匀，单节点受冻结上限约束）。 */
+  const growField = (
+    targets: MutableNode[],
+    maxChars: number,
+    readChars: (n: MutableNode) => number,
+    rewrite: (n: MutableNode, chars: number) => void,
+  ): void => {
+    for (let pass = 0; pass < 6 && bytes < aimBytes; pass++) {
+      const deficit = aimBytes - bytes
+      const growable = targets.filter((n) => readChars(n) < maxChars)
+      if (growable.length === 0) break
+      // 中文约 3 字节/字；取全体统一的字符增量，统一施加（保持分布形状）
+      const step = Math.max(1, Math.ceil(deficit / growable.length / 3))
+      for (const node of growable) {
+        const next = Math.min(maxChars, readChars(node) + step)
+        if (next <= readChars(node)) continue
+        const before = contentBytesOf(node)
+        rewrite(node, next)
+        bytes += contentBytesOf(node) - before
+      }
+    }
+  }
+
+  if (bytes < aimBytes) {
+    growField(noteNodes, NOTE_CHAR_RANGE[1], (n) => (n.noteText ?? "").length, rewriteNote)
+    growField(longTextNodes, LONG_TEXT_CHAR_RANGE[1], (n) => n.titleText.length, rewriteLongTextTitle)
   }
 
   if (bytes < minBytes || bytes > maxBytes) {

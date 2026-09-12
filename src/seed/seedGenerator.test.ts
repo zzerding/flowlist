@@ -1,15 +1,31 @@
 import { describe, expect, it } from "vitest"
 
 import { generateSeed } from "./seedGenerator"
-import { TARGET_BYTES, TARGET_NODE_COUNT, BYTE_TOLERANCE } from "./seedConstants"
+import {
+  TARGET_BYTES,
+  TARGET_NODE_COUNT,
+  TARGET_BYTES_PER_NODE,
+  BYTE_TOLERANCE,
+  LONG_TEXT_CHAR_RANGE,
+  NOTE_CHAR_RANGE,
+  MAX_NODE_BYTE_SHARE,
+} from "./seedConstants"
 import { isTombstoned } from "../domain/nodeRecord"
 
 /**
  * seed 生成器契约测试(接缝 1,issue #2 决策记录第 7 条)。
- * 小规模用例用缩小参数控制单测时长;全量用例至少跑一次并记录耗时。
- * 注意小规模下限:每节点约 500B JSON 结构开销,否则体积契约无法收敛。
+ * 小规模用例按**冻结密度**（架构 §14.1: 50MB/100k ≈ 524 B/节点）等比缩放，
+ * 不得自行拔高密度 —— 超出冻结字符范围产能的密度在物理上不可满足，
+ * 旧实现曾用单节点超限 4800 倍硬凑（issue #2 已修）。
+ * 全量用例至少跑一次并记录耗时。
  */
-const SMALL = { nodeCount: 2_000, targetBytes: 1_500_000 }
+const scaledTarget = (nodeCount: number): number => Math.round(nodeCount * TARGET_BYTES_PER_NODE)
+const SMALL = { nodeCount: 2_000, targetBytes: scaledTarget(2_000) }
+
+/** 节点序列化字节（title + note）。 */
+const nodeBytes = (node: (typeof SMALL extends never ? never : { title: unknown; note?: unknown })): number =>
+  new TextEncoder().encode(JSON.stringify(node.title)).length +
+  (node.note ? new TextEncoder().encode(JSON.stringify(node.note)).length : 0)
 
 describe("seed 生成器", () => {
   it("确定性:同 seed 同输出(结构、内容、体积全等)", () => {
@@ -47,7 +63,7 @@ describe("seed 生成器", () => {
   })
 
   it("内容配比抽查:类型、语言、备注、折叠、tombstone 接近冻结配比", () => {
-    const { nodes } = generateSeed({ nodeCount: 20_000, targetBytes: 15_000_000 })
+    const { nodes } = generateSeed({ nodeCount: 20_000, targetBytes: scaledTarget(20_000) })
     const n = nodes.length
     const ratio = (pred: (x: (typeof nodes)[number]) => boolean): number =>
       nodes.filter(pred).length / n
@@ -123,7 +139,7 @@ describe("seed 生成器", () => {
   })
 
   it("深度分布落在冻结的三个带内(最深 ≤12)", () => {
-    const { nodes } = generateSeed({ nodeCount: 10_000, targetBytes: 8_000_000 })
+    const { nodes } = generateSeed({ nodeCount: 10_000, targetBytes: scaledTarget(10_000) })
     const depthOf = new Map<string, number>([["root", 0]])
     // parentId 顺序无保证,按拓扑推进
     const pending = [...nodes]
@@ -159,4 +175,41 @@ describe("seed 生成器", () => {
     },
     120_000,
   )
+
+  // 守卫不变量（issue #2：旧实现把 13MB / 5.8M 字符塞进首屏第一行 n0，
+  // 导致首屏渲染主线程阻塞 ~103s 而门禁无任何告警。以下断言即防复发）。
+  it("守卫：任何节点的 titleText 不得超过冻结长文本上限", () => {
+    const { nodes } = generateSeed({ ...SMALL, seed: 11 })
+    const over = nodes.filter((x) => x.titleText.length > LONG_TEXT_CHAR_RANGE[1])
+    expect(over.map((x) => `${x.id}:${x.titleText.length}`)).toEqual([])
+  })
+
+  it("守卫：任何节点的备注不得超过冻结备注上限", () => {
+    const { nodes } = generateSeed({ ...SMALL, seed: 12 })
+    const over = nodes
+      .filter((x) => (x.noteText ?? "").length > NOTE_CHAR_RANGE[1])
+      .map((x) => `${x.id}:${(x.noteText ?? "").length}`)
+    expect(over).toEqual([])
+  })
+
+  it("守卫：单节点字节占总量比例有上限（无超大节点）", () => {
+    const { nodes, bytes } = generateSeed({ ...SMALL, seed: 13 })
+    const worst = nodes.reduce(
+      (acc, node) => Math.max(acc, nodeBytes(node) / bytes),
+      0,
+    )
+    expect(worst).toBeLessThanOrEqual(MAX_NODE_BYTE_SHARE)
+  })
+
+  it("守卫：全量 100k 下单节点占比同样有上限（首屏第一行不得成为巨型节点）", () => {
+    const { nodes, bytes } = generateSeed()
+    const worst = nodes.reduce(
+      (acc, node) => Math.max(acc, nodeBytes(node) / bytes),
+      0,
+    )
+    expect(worst).toBeLessThanOrEqual(MAX_NODE_BYTE_SHARE)
+    // 首屏第一行（root 的第一个子节点）必须是普通体量，否则启动门禁必然失败
+    const firstRootChild = nodes.find((x) => x.parentId === "root")!
+    expect(nodeBytes(firstRootChild)).toBeLessThan(64 * 1024)
+  })
 })
