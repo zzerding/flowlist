@@ -1,0 +1,80 @@
+/* Flowlist 原型样式：静态行与活动行布局对齐（无跳变）。 */
+
+:root {
+  font-family: system-ui, -apple-system, "PingFang SC", sans-serif;
+  color-scheme: light dark;
+}
+
+.flow-outline {
+  height: 80vh;
+  overflow-y: auto;
+  border: 1px solid #ccc5;
+  border-radius: 4px;
+}
+
+.flow-row {
+  display: flex;
+  align-items: baseline;
+  box-sizing: border-box;
+  line-height: 36px; /* 与 ROW_HEIGHT 一致：静态/活动切换无跳变 */
+}
+
+.flow-row-static,
+.flow-active-editor {
+  display: block;
+  width: 100%;
+  min-height: 36px;
+  line-height: 36px;
+  padding: 0 8px;
+  box-sizing: border-box;
+}
+
+.flow-row-heading {
+  font-weight: 600;
+  margin: 0;
+}
+
+.flow-row-title {
+  display: inline;
+}
+
+.flow-row-note {
+  display: block;
+  color: #666;
+  line-height: 1.5;
+}
+
+.flow-todo-mark {
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+  border: 2px solid currentColor;
+  border-radius: 3px;
+  margin-right: 6px;
+  vertical-align: text-bottom;
+}
+
+.flow-todo-mark.done {
+  background: currentColor;
+}
+
+.flow-note-indicator {
+  margin-left: 8px;
+  font-size: 12px;
+  border: none;
+  background: none;
+  color: #888;
+  cursor: pointer;
+  line-height: 36px;
+  padding: 0 4px;
+}
+
+.flow-active-editor:focus {
+  outline: none;
+  background: #8881;
+}
+
+.flow-loading {
+  padding: 12px 8px;
+  color: #888;
+}
