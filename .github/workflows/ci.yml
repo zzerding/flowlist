@@ -81,6 +81,10 @@ jobs:
       - run: pnpm exec playwright install --with-deps chromium
       - run: pnpm build
       - run: pnpm exec playwright test --project=performance
+        env:
+          # 门禁为绝对值判定（架构 §14.2）；不设此变量时性能用例全部 skip，
+          # job 会“假绿”——必须显式开启。
+          PERF_FULL: "1"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
