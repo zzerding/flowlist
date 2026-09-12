@@ -66,6 +66,18 @@ rounded to nearest multiple of 8ms）。`src/telemetry/metrics.ts` 的
 测试侧临时用 rAF 差值法黑盒近似（含一帧渲染预算，阈值放宽为两帧 33ms），
 并在报告中标注；修复须在实现侧（observer 加 `durationThreshold: 16`）。
 
+### 7. seed 建库的原生版本必须对齐 Dexie（×10）
+
+错误认知：「seedEntry 用 `indexedDB.open("flowlist", 1)` 建库，应用 Dexie
+`db.version(1)` 打开同一版本，匹配」——**不匹配**。Dexie 内部把逻辑版本 ×10 作为
+原生版本：`db.version(1)` 实际打开的是原生版本 **10**。若 seed 用原生 1 建库，
+应用每次 reload 打开 DB 都会触发 v0.1→v1.0 的升级事务，100k/50MB 下全库索引
+校验实测 ~97s/轮（reload 门禁单样本 ≈100s 的根源之一；原生 IDB 冷读 ~95s
+是同一机理——升级事务与首次全表遍历都要在 50MB 存储上过一遍）。
+
+**正确用法**：seedEntry 用 `indexedDB.open("flowlist", 10)` 建库（与 db.ts v1 对齐），
+reload 后应用零升级、首屏就绪 ~250ms。seed 表结构/索引名不变，只是原生版本号。
+
 ## 快速命令
 
 ```bash
@@ -78,12 +90,12 @@ pnpm e2e
 # 单个门禁用例（先冒烟 harness，需 PERF_FULL=1）
 PERF_FULL=1 pnpm exec playwright test e2e/performance.perf.ts --project=performance --grep "搜索"
 
-# 全量门禁（正式判定，100k/50MB，约 10-15min；启动门禁单样本含 ~97s 索引阻塞，50 样本轮耗时长）
+# 全量门禁（正式判定，100k/50MB；reload 每轮 ~0.3-1s，50 轮启动采样快）
 PERF_FULL=1 pnpm e2e --project=performance
 ```
 
 ## 已知门禁现状（2026-09 全量实测，测试报告详情见 issue #2）
 
-- 启动门禁红：单样本 startup ≈ 100s（数据加载 ~3s + FlexSearch 全量索引阻塞主线程 ~97s），
-  门禁 1s。采样成本高（每样本 ~100s），因此门禁按需执行，不随日常 e2e 跑。
+- 启动门禁：懒加载分阶段启动后（首屏 128 行可编辑 ~250-450ms），门禁应绿；
+  历史红源为 seed 原生版本未对齐 Dexie（见坑 7）+ 全量/索引阻塞主线程。
 - 结构操作门禁 skipped：原型未实现新增/删除/移动命令，`flowlist:structure` 无数据源。

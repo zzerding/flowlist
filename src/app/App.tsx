@@ -6,7 +6,12 @@ import { runtime } from "./runtime"
 import { DataStore } from "../data/dataStore"
 import { META_KEYS } from "../data/db"
 import { SearchService } from "../search/searchService"
-import { buildChildrenIndex, flattenVisible, nodesAtom, outlineRowsAtom } from "../state/outlineState"
+import {
+  emptyVisibleWindow,
+  extendVisibleWindow,
+  startupReadyAtom,
+  visibleWindowAtom,
+} from "../state/outlineState"
 import { Outline } from "../outline/Outline"
 import { installMetricsWindow, mark, measure } from "../telemetry/metrics"
 
@@ -31,51 +36,69 @@ export const rememberScrollPosition = (scrollTop: number): void => {
 }
 
 /**
- * 应用顶层：
- * 1. 启动流程从 Dexie 加载可见节点到内存表（原型全量加载可见节点；
- *    分页/焦点路径加载归后续切片，原型已断言 DOM 不随数据增长）；
- * 2. FlexSearch 索引由 Worker 直接读 IndexedDB 后台重建（决策补充：索引不占
- *    主线程；构建期间搜索返回部分结果，架构 §8/§12 分阶段启动）；
- * 3. 恢复：刷新后数据 + 滚动位置（决策记录第 6 条）；
- * 4. 挂性能指标只读入口（window.__flowlistMetrics）。
+ * 首屏行预算：720p 视口可视约 20 行 + overscan(8)，留冗余。
+ * 只决定首屏一次枚举多少行，与门禁阈值（1s 绝对值）无关。
+ */
+export const FIRST_SCREEN_ROW_BUDGET = 128
+
+/**
+ * 应用顶层（架构 §8 分阶段启动 + 懒加载）：
+ * 1. 首屏只枚举「根视图 + 可视范围」的真实行（`extendVisibleWindow` 按
+ *    `flattenVisible` 顺序逐层取子节点）；**永不整体读 nodes 表** ——
+ *    实测 100k/50MB 一次全表读（原生 IndexedDB 亦然）冷启动 ~95s，
+ *    是旧 `reload ≈110s` 的根源；
+ * 2. 后续行由滚动到窗口尾部时按需扩展（Outline 侧，完整无限滚动/焦点路径
+ *    跳转归 #3/#4）；
+ * 3. FlexSearch 索引重建仍在 Worker，且**首屏可编辑后才启动**（阶段 2），
+ *    不参与 init → first-editable 的启动路径（决策补充：索引不占主线程）；
+ * 4. 恢复：刷新后数据 + 滚动位置（决策记录第 6 条）；
+ * 5. 挂性能指标只读入口（window.__flowlistMetrics）。
  */
 declare global {
   interface Window {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     __SKIP_REINDEX__?: unknown
   }
 }
 
 export function App() {
-  const setNodes = useAtomSet(nodesAtom)
-  const setRows = useAtomSet(outlineRowsAtom)
-  const nodes = useAtomValue(nodesAtom)
+  const setWindow = useAtomSet(visibleWindowAtom)
+  const setStartupReady = useAtomSet(startupReadyAtom)
+  const startupReady = useAtomValue(startupReadyAtom)
+  const nodes = useAtomValue(visibleWindowAtom).nodes
 
   useEffect(() => {
     installMetricsWindow()
     const program = Effect.gen(function* () {
       const store = yield* DataStore
       yield* store.ensureSchemaVersion()
-      const visible = yield* store.getAllVisibleNodes()
+      // 阶段 1：首屏真实数据行（含折叠/tombstone 语义，见 outlineState 契约）。
+      const initial = yield* extendVisibleWindow(
+        emptyVisibleWindow(),
+        (parentId) => store.getChildren(parentId),
+        FIRST_SCREEN_ROW_BUDGET,
+      )
       const savedScroll = yield* store.getMeta<number>(META_KEYS.lastScrollTop)
       yield* Effect.sync(() => {
-        setNodes(new Map(visible.map((n) => [n.id, n])))
-        // 行表只在加载时派生一次（原型无结构变更；结构命令归后续切片）。
-        // 逐键编辑只更新 nodesAtom，不重算行表（100k 派生 ~45ms，进不了 16ms 输入门禁）。
-        setRows(flattenVisible(buildChildrenIndex(visible)))
+        setWindow(initial)
+        setStartupReady(true)
         if (typeof savedScroll === "number") offerScrollRestore(savedScroll)
         mark("flowlist:data-ready")
       })
-      // 索引重建移入 Worker（直接流式读 IndexedDB，主线程零参与——决策补充：
-      // 索引不占主线程）。
-      const search = yield* SearchService
-      if (!window.__SKIP_REINDEX__) yield* search.rebuildFromStore()
     })
 
     void runtime.runPromise(program).catch((error) => {
       console.error("启动失败", error)
     })
-  }, [setNodes])
+  }, [setWindow, setStartupReady])
+
+  // 阶段 2（首屏渲染完成后）：Worker 索引重建。放在 effect 里确保排在
+  // 首屏真实行渲染/挂载之后，避免与首屏读取争抢 IndexedDB 磁盘 I/O。
+  useEffect(() => {
+    if (!startupReady || window.__SKIP_REINDEX__) return
+    void runtime
+      .runPromise(SearchService.use((search) => search.rebuildFromStore()))
+      .catch((error) => console.error("搜索索引重建失败", error))
+  }, [startupReady])
 
   return (
     <main>

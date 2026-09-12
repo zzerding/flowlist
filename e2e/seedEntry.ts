@@ -17,9 +17,12 @@ declare const __SEED_BYTES__: number
 
   const { nodes } = generateSeed({ nodeCount: __SEED_COUNT__, targetBytes: __SEED_BYTES__ })
 
-  // addInitScript 阶段应用尚未打开 Dexie：这里自建库与表（与 src/data/db.ts v1 schema 一致）
+  // addInitScript 阶段应用尚未打开 Dexie：这里自建库与表（与 src/data/db.ts v1 schema 一致）。
+  // 原生版本必须对齐 Dexie：Dexie `db.version(1)` 打开的是原生版本 10（Dexie 内部 ×10）。
+  // 若用原生 1 建库，应用每次 open 都会触发 v0.1→v1.0 升级事务，100k/50MB 下
+  // 全库索引校验实测 ~97s → reload 门禁不可测（实测证据见第一次 100k 启动门禁运行）。
   const db = await new Promise<IDBDatabase>((resolve, reject) => {
-    const open = indexedDB.open("flowlist", 1)
+    const open = indexedDB.open("flowlist", 10)
     open.onupgradeneeded = () => {
       const raw = open.result
       if (!raw.objectStoreNames.contains("nodes")) {

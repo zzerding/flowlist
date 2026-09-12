@@ -108,10 +108,22 @@ function CommitOnChange({
   useEffect(() => {
     editorRef.current = editor
   }, [editor, editorRef])
+  // 载入内容不算编辑：挂载时 Lexical 载入 initialContent 会在同一提交内触发
+  // 一次 onChange（首屏默认光标行会因此在启动时白写一次 Dexie）。
+  // 只忽略挂载同轮（同步）的变化；用户输入总是发生在后续事件循环轮次。
+  const mountedRef = useRef(false)
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      mountedRef.current = true
+    }, 0)
+    return () => clearTimeout(timer)
+  }, [])
   return (
     <OnChangePlugin
       ignoreHistoryMergeTagChange={false}
+      ignoreSelectionChange
       onChange={(editorState) => {
+        if (!mountedRef.current) return
         onChange(editorState.toJSON())
       }}
     />

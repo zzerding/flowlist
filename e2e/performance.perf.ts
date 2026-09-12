@@ -93,16 +93,21 @@ test.describe("S1 性能门禁", () => {
         await page.reload()
       }
     }
+    // 懒加载启动（架构 §8）：首屏只装载根视图 + 可视范围的真实行；
+    // 后续行由滚动按需扩展。这里等首个可编辑真实行就绪（启动门禁的前提）。
     await page.waitForFunction(
-      () => Number(document.querySelector("[data-testid='loaded-count']")?.textContent) > 0,
+      () =>
+        document.querySelector("[data-testid='active-editor']") !== null &&
+        Number(document.querySelector("[data-testid='loaded-count']")?.textContent) > 0,
       { timeout: 120_000 },
     )
   }
 
   test("启动到首屏可编辑 P95 ≤1s(50 样本)", async ({ page }) => {
     await prepare(page)
-    // 首屏默认可编辑入口已实现（幽灵活动行，修复项 4）：加载后无需任何交互，
-    // recordStartup 即在 ghost 编辑器挂载时结算 flowlist:startup。
+    // 首屏默认可编辑入口：分阶段启动装载首屏真实数据行后，默认光标行自动落到
+    // 首个体量正常的真实行（修复项 4 + 启动门禁语义：首个可编辑入口必须来自
+    // 真实数据，不能是空幽灵行）。加载后无需任何交互。
     // （原流程每轮点击 rows[1] 触发编辑器挂载，是「无默认可编辑入口」时的
     // 临时采样手段；rows[1] 是 seed 校准节点，点击会触发分钟级主线程阻塞，
     // 详见 e2e/README.md 坑 2 —— 该 workaround 随修复移除。）
@@ -225,21 +230,36 @@ test.describe("S1 性能门禁", () => {
     const t0 = Date.now()
     await prepare(page)
     console.log(`[dom] prepare_ms=${Date.now() - t0}`)
-    const positions = [0, 0.25, 0.5, 0.75, 0.99]
-    for (const frac of positions) {
-      await page.getByTestId("outline-scroll").evaluate((el, f) => {
-        el.scrollTop = (el.scrollHeight - el.clientHeight) * f
-      }, frac)
-      await page.waitForTimeout(300)
+
+    // 断言阈值不变（可视行 + overscan ≤40 行；contenteditable 恒 ≤1；总 DOM < 500）。
+    const assertBounded = async (): Promise<void> => {
       const count = await page.evaluate(() => document.querySelectorAll(".flow-row").length)
       const editables = await page.evaluate(
         () => document.querySelectorAll("[contenteditable='true']").length,
       )
-      // 可视行 + overscan(8) 在 720p 视口下 ≤40 行;contenteditable 恒 ≤1(一票否决项)
       expect(count).toBeLessThan(60)
       expect(editables).toBeLessThanOrEqual(1)
     }
-    // 总 DOM 节点数:与可视区域成正比,不随 100k 增长
+
+    // 懒加载（架构 §8）：客户端不再持有整棵树，滚到窗口尾部才装载下一窗口。
+    // 因此重复推动多个窗口到底部（而非一次滚完 100k），覆盖 100k 深处的可视行；
+    // 每步都断言 DOM 有界。
+    const positions = [0, 0.25, 0.5, 0.75, 0.99]
+    for (let window = 0; window < 8; window++) {
+      for (const frac of positions) {
+        await page.getByTestId("outline-scroll").evaluate((el, f) => {
+          el.scrollTop = (el.scrollHeight - el.clientHeight) * f
+        }, frac)
+        await page.waitForTimeout(200)
+        await assertBounded()
+      }
+    }
+
+    // 懒加载确实被推动（已加载行数远超单个窗口），但 DOM 仍只与可视区成正比。
+    const loadedRows = await page.evaluate(() =>
+      Number(document.querySelector("[data-testid='loaded-count']")?.textContent),
+    )
+    expect(loadedRows).toBeGreaterThan(300)
     const total = await page.evaluate(() => document.querySelectorAll("*").length)
     expect(total).toBeLessThan(500)
   })

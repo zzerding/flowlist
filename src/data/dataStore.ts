@@ -3,6 +3,10 @@ import { Context, Effect, Layer, Schema } from "effect"
 import { db, META_KEYS, SCHEMA_VERSION, type MetaRecord } from "../data/db"
 import type { NodeRecord } from "../domain/nodeRecord"
 
+/** orderKey 升序（与 outlineState.buildChildrenIndex 同一比较语义）。 */
+const compareOrderKey = (a: NodeRecord, b: NodeRecord): number =>
+  a.orderKey < b.orderKey ? -1 : a.orderKey > b.orderKey ? 1 : 0
+
 /** Typed Error：数据层事务失败（架构 §16 分类中的 StorageTransactionError 占位）。 */
 export class StoreError extends Schema.TaggedError<StoreError>()("DataStoreError", {
   cause: Schema.String,
@@ -22,6 +26,15 @@ export class DataStore extends Context.Service<DataStore, {
     expectedRevision: number,
   ) => Effect.Effect<boolean, StoreError>
   readonly putNode: (node: NodeRecord) => Effect.Effect<void, StoreError>
+  /**
+   * 读取某父节点的子节点（orderKey 升序，parentId 等值索引，非全表扫描）。
+   * 懒加载可视窗口的基本单位（架构 §8：只有首屏和虚拟窗口邻近节点进主线程缓存）。
+   */
+  readonly getChildren: (parentId: string) => Effect.Effect<Array<NodeRecord>, StoreError>
+  /**
+   * 全量读可见节点。**不在启动路径上**：实测 100k/50MB 一次全表读冷启动 ~95s
+   * （含原生 IndexedDB openKeyCursor），保留给测试/自检与后续导出使用。
+   */
   readonly getAllVisibleNodes: () => Effect.Effect<Array<NodeRecord>, StoreError>
   readonly bulkPutNodes: (nodes: Array<NodeRecord>) => Effect.Effect<void, StoreError>
   readonly countAll: () => Effect.Effect<number, StoreError>
@@ -59,6 +72,16 @@ const storeShape = {
   putNode: (node: NodeRecord) =>
     Effect.tryPromise({
       try: () => db.nodes.put(node).then(() => undefined),
+      catch: (error) => new StoreError({ cause: String(error) }),
+    }),
+
+  getChildren: (parentId: string) =>
+    Effect.tryPromise({
+      try: async () => {
+        const children = await db.nodes.where("parentId").equals(parentId).toArray()
+        children.sort(compareOrderKey)
+        return children
+      },
       catch: (error) => new StoreError({ cause: String(error) }),
     }),
 

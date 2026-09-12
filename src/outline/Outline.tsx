@@ -7,21 +7,37 @@ import { ActiveEditor } from "../editor/ActiveEditor"
 import { StaticContent } from "../editor/staticRenderer"
 import type { NodeRecord } from "../domain/nodeRecord"
 import { validateContent } from "../editor/staticRenderer"
-import { activeEditAtom, expandedNoteAtom, nodesAtom, outlineRowsAtom, type ActiveEdit } from "../state/outlineState"
+import {
+  activeEditAtom,
+  expandedNoteAtom,
+  extendVisibleWindow,
+  firstEditableRowId,
+  startupReadyAtom,
+  visibleWindowAtom,
+  visibleWindowExhausted,
+  type ActiveEdit,
+} from "../state/outlineState"
 import { runtime, DataStore, SearchService } from "../app/runtime"
 import { consumePendingScrollRestore, rememberScrollPosition } from "../app/App"
 import { measure, mark } from "../telemetry/metrics"
 
 /**
  * 大纲虚拟列表（原型）：
- * - TanStack Virtual 只渲染可视行 + overscan（DOM 规模不随 100k 增长）；
+ * - TanStack Virtual 只渲染可视行 + overscan（DOM 规模不随数据规模增长）；
  * - 静态行用 StaticContent；活动行挂唯一 Lexical contenteditable；
  * - 行高统一固定值，静态/活动切换无布局跳变；
- * - 数据未加载完成时先渲染幽灵活动行，首屏即有可编辑光标入口
- *   （决策补充连带修复项 4，架构 §12 分阶段启动）。
+ * - 懒加载可视窗口（架构 §8）：滚动接近已加载尾部时按需继续枚举子节点，
+ *   永不整体读取 nodes 表；完整无限滚动与焦点路径跳转归 #3/#4；
+ * - 分阶段启动：首屏真实行就绪后，默认光标行自动落到首个体量正常的真实行
+ *   （启动门禁语义：首个可编辑入口必须来自真实数据）；幽灵行仅用于空库兜底。
  */
 
 const ROW_HEIGHT = 36
+
+/** 每次按需扩展追加的行数（≈ 一屏多；覆盖 overscan 邻近区）。 */
+const EXTEND_ROWS = 128
+/** 最后渲染行距离已加载尾部少于该值时触发扩展。 */
+const EXTEND_TRIGGER_GAP = 32
 
 /** 编辑合并窗口（架构 §9：编辑「100ms 内合并为节点补丁」，不逐键写 Dexie）。 */
 const EDIT_MERGE_MS = 100
@@ -33,19 +49,21 @@ const toPatch = (field: "title" | "note", state: unknown): Partial<NodeRecord> =
     : { note: state as NonNullable<NodeRecord["note"]>, noteText: extractText(state) }
 
 export function Outline() {
-  const rows = useAtomValue(outlineRowsAtom)
-  const nodes = useAtomValue(nodesAtom)
+  const windowState = useAtomValue(visibleWindowAtom)
+  const rows = windowState.rows
+  const nodes = windowState.nodes
+  const startupReady = useAtomValue(startupReadyAtom)
   const activeEdit = useAtomValue(activeEditAtom)
   const setActiveEdit = useAtomSet(activeEditAtom)
-  const setNodes = useAtomSet(nodesAtom)
+  const setWindow = useAtomSet(visibleWindowAtom)
   const setExpandedNote = useAtomSet(expandedNoteAtom)
 
   const scrollRef = useRef<HTMLDivElement>(null)
 
-  // 编辑热路径（输入门禁 ET P95 ≤16ms 约束下，逐键不碰 Dexie 与 100k 全量 Map）：
+  // 编辑热路径（输入门禁 ET P95 ≤16ms 约束下，逐键不碰 Dexie 与全量 Map）：
   // - lastEditRef/dirtyRef：暂存最新编辑内容（每次 onChange 覆盖，合并窗口语义）；
   // - saveTimerRef：合并窗口定时器，到期提交一次 Dexie；
-  // - revisionsRef：乐观 revision 缓存（nodesAtom 克隆 100k 条 ~17ms，不逐键更新）；
+  // - revisionsRef：乐观 revision 缓存（切行走时同步内存表，不逐键更新）；
   // - 切行走时 flush：取消定时器、立即提交，并把最新内容同步进内存表。
   const revisionsRef = useRef(new Map<string, number>())
   const lastEditRef = useRef<{
@@ -66,6 +84,17 @@ export function Outline() {
   // 恢复滚动位置 + 卸载/刷新时持久化（决策记录第 6 条）。
   // 数据异步加载，等首行渲染后再恢复（否则消费时机早于 offer）。
   const hasRows = rows.length > 0
+
+  // 首屏默认光标行（架构 §8 步骤 4）：首屏真实行渲染后自动挂载活动编辑器，
+  // 无需交互。只在首次就绪时执行一次（不抢用户后续焦点）。
+  const autoActivatedRef = useRef(false)
+  useEffect(() => {
+    if (autoActivatedRef.current || !startupReady || !hasRows) return
+    autoActivatedRef.current = true
+    const id = firstEditableRowId(rows, nodes)
+    if (id !== null) setActiveEdit({ nodeId: id, field: "title" })
+  }, [startupReady, hasRows, rows, nodes, setActiveEdit])
+
   useEffect(() => {
     if (!hasRows) return
     const el = scrollRef.current
@@ -88,6 +117,39 @@ export function Outline() {
     estimateSize: () => ROW_HEIGHT,
     overscan: 8,
   })
+
+  /** 按需扩展可视窗口（懒加载；同一时刻至多一个在途）。 */
+  const extendingRef = useRef(false)
+  const extendViewport = useCallback(() => {
+    if (extendingRef.current || visibleWindowExhausted(windowState)) return
+    extendingRef.current = true
+    const program = Effect.gen(function* () {
+      const store = yield* DataStore
+      const next = yield* extendVisibleWindow(
+        windowState,
+        (parentId) => store.getChildren(parentId),
+        windowState.rows.length + EXTEND_ROWS,
+      )
+      yield* Effect.sync(() => setWindow(next))
+    })
+    void runtime
+      .runPromise(program)
+      .catch((error) => console.error("扩展可视窗口失败", error))
+      .finally(() => {
+        extendingRef.current = false
+      })
+  }, [windowState, setWindow])
+
+  const virtualItems = virtualizer.getVirtualItems()
+  const lastVirtualIndex =
+    virtualItems.length > 0 ? virtualItems[virtualItems.length - 1]!.index : 0
+
+  // 滚动接近已加载尾部时扩展（懒加载触发点）。
+  useEffect(() => {
+    if (!startupReady || rows.length === 0) return
+    if (lastVirtualIndex < rows.length - EXTEND_TRIGGER_GAP) return
+    extendViewport()
+  }, [startupReady, lastVirtualIndex, rows.length, extendViewport])
 
   /** Dexie 提交（含冲突重提）；返回是否提交成功。 */
   const commitToStore = useCallback(
@@ -145,23 +207,22 @@ export function Outline() {
       })
       .catch(() => undefined)
     if (!syncMemory) return
-    // 内存表同步（仅切换活动行时）：把最新内容写进 nodesAtom，
-    // 切换后静态行/重新激活展示正确。克隆 100k 条 Map ~17ms，
-    // 不能随合并窗口逐次执行（会打爆输入门禁），Dexie 已是真写源。
+    // 内存表同步（仅切换活动行时）：把最新内容写进可视窗口的节点表，
+    // 切换后静态行/重新激活展示正确。Dexie 仍是真写源。
     const node = nodes.get(pending.nodeId)
     if (!node) return
     const revision = revisionsRef.current.get(pending.nodeId) ?? node.revision
-    setNodes((prev) => {
-      const next = new Map(prev)
-      next.set(pending.nodeId, {
+    setWindow((prev) => {
+      const nextNodes = new Map(prev.nodes)
+      nextNodes.set(pending.nodeId, {
         ...node,
         ...toPatch(pending.field, pending.state),
         revision,
         updatedAt: Date.now(),
       })
-      return next
+      return { ...prev, nodes: nextNodes }
     })
-  }, [commitToStore, nodes, setNodes])
+  }, [commitToStore, nodes, setWindow])
 
   /** onChange 入口：只暂存内容 + 重置合并窗口（无 IO，保证输入延迟）。 */
   const commitEdit = useCallback(
@@ -189,8 +250,6 @@ export function Outline() {
     },
     [flushPendingEdit, setActiveEdit, setExpandedNote],
   )
-
-  const virtualItems = virtualizer.getVirtualItems()
 
   return (
     <div className="flow-outline" ref={scrollRef} data-testid="outline-scroll">
@@ -256,8 +315,9 @@ export function Outline() {
             )
           })}
         </div>
-      ) : (
-        // 幽灵活动行：数据加载完成前首屏即有可编辑入口（不落库，加载后被真实行替换）
+      ) : startupReady ? (
+        // 幽灵活动行：数据就绪但为空（全新安装）时提供默认可编辑入口
+        // （不落库，不参与启动门禁 —— 有真实数据时首行即真实行）。
         <div className="flow-row" data-node-id="__ghost__" style={{ minHeight: ROW_HEIGHT }}>
           <ActiveEditor
             fieldLabel="title"
@@ -266,6 +326,12 @@ export function Outline() {
             onCommitHistory={() => undefined}
             autoFocus
           />
+        </div>
+      ) : (
+        // 加载占位（首屏读取中）：非 contenteditable，
+        // 保证 flowlist:startup 在真实数据行就绪后才结算。
+        <div className="flow-loading" data-testid="outline-loading">
+          加载中…
         </div>
       )}
     </div>

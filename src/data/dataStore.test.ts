@@ -6,6 +6,13 @@ import { db, META_KEYS, SCHEMA_VERSION } from "./db"
 import { DataStore, DataStoreLayer } from "./dataStore"
 import type { NodeRecord } from "../domain/nodeRecord"
 import { generateSeed } from "../seed/seedGenerator"
+import {
+  buildChildrenIndex,
+  emptyVisibleWindow,
+  extendVisibleWindow,
+  flattenVisible,
+  visibleWindowExhausted,
+} from "../state/outlineState"
 
 /**
  * 数据服务契约测试(接缝 2:Vitest + fake-indexeddb)。
@@ -63,6 +70,80 @@ describe("DataStore(fake-indexeddb)", () => {
     expect(await Effect.runPromise(store.countAll())).toBe(nodes.length)
     const all = await Effect.runPromise(store.getAllVisibleNodes())
     expect(all.length).toBeGreaterThan(nodes.length * 0.9) // tombstone ≈2% 被过滤
+  })
+
+  describe("getChildren / 懒加载可视窗口（架构 §8）", () => {
+    const loadChildren = (store: typeof DataStore.Service) => (parentId: string) =>
+      store.getChildren(parentId)
+
+    it("getChildren 按 orderKey 升序返回子节点（不读全表）", async () => {
+      const store = makeStore()
+      await Effect.runPromise(store.putNode(makeNode("b", { orderKey: "b" })))
+      await Effect.runPromise(store.putNode(makeNode("a", { orderKey: "a" })))
+      await Effect.runPromise(store.putNode(makeNode("a1", { parentId: "a", orderKey: "a0" })))
+      const children = await Effect.runPromise(store.getChildren("root"))
+      expect(children.map((n) => n.id)).toEqual(["a", "b"])
+      const underA = await Effect.runPromise(store.getChildren("a"))
+      expect(underA.map((n) => n.id)).toEqual(["a1"])
+    })
+
+    it("分次扩展：行表始终是全量行表的前缀（语义等价、无重复无遗漏）", async () => {
+      const store = makeStore()
+      const { nodes } = generateSeed({ nodeCount: 400, targetBytes: 300_000 })
+      await Effect.runPromise(store.bulkPutNodes(nodes))
+      const fullRows = flattenVisible(buildChildrenIndex(nodes))
+
+      let state = emptyVisibleWindow()
+      const targets = [16, 64, 160]
+      for (const target of targets) {
+        state = await Effect.runPromise(
+          extendVisibleWindow(state, loadChildren(store), target),
+        )
+        expect(state.rows.length).toBeGreaterThanOrEqual(Math.min(target, fullRows.length))
+        // 前缀等价：与全量派生行表逐行一致（折叠/tombstone 规则相同）
+        expect(state.rows).toEqual(fullRows.slice(0, state.rows.length))
+      }
+      // 已加载节点只覆盖窗口，不是全量
+      expect(state.nodes.size).toBe(state.rows.length)
+      expect(state.nodes.size).toBeLessThan(nodes.length)
+    })
+
+    it("折叠节点不展开子树（与 flattenVisible 一致）", async () => {
+      const store = makeStore()
+      await Effect.runPromise(store.putNode(makeNode("a", { collapsed: true })))
+      await Effect.runPromise(store.putNode(makeNode("a1", { parentId: "a" })))
+      await Effect.runPromise(store.putNode(makeNode("b")))
+      const state = await Effect.runPromise(
+        extendVisibleWindow(emptyVisibleWindow(), loadChildren(store), 16),
+      )
+      expect(state.rows.map((r) => r.id)).toEqual(["a", "b"]) // a1 不在（折叠子树）
+    })
+
+    it("tombstone 节点及其子树不进入可视窗口", async () => {
+      const store = makeStore()
+      await Effect.runPromise(store.putNode(makeNode("a", { tombstonedAt: 1 })))
+      await Effect.runPromise(store.putNode(makeNode("a1", { parentId: "a" })))
+      await Effect.runPromise(store.putNode(makeNode("b")))
+      const state = await Effect.runPromise(
+        extendVisibleWindow(emptyVisibleWindow(), loadChildren(store), 16),
+      )
+      expect(state.rows.map((r) => r.id)).toEqual(["b"])
+    })
+
+    it("树枚举完后 exhausted，继续扩展不重复取数", async () => {
+      const store = makeStore()
+      await Effect.runPromise(store.putNode(makeNode("a")))
+      await Effect.runPromise(store.putNode(makeNode("b")))
+      let state = await Effect.runPromise(
+        extendVisibleWindow(emptyVisibleWindow(), loadChildren(store), 16),
+      )
+      expect(state.rows.map((r) => r.id)).toEqual(["a", "b"])
+      expect(visibleWindowExhausted(state)).toBe(true)
+      state = await Effect.runPromise(
+        extendVisibleWindow(state, loadChildren(store), 64),
+      )
+      expect(state.rows.map((r) => r.id)).toEqual(["a", "b"])
+    })
   })
 
   describe("patchNode 与 revision 乐观锁", () => {

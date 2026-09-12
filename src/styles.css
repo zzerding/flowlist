@@ -73,3 +73,8 @@
   outline: none;
   background: #8881;
 }
+
+.flow-loading {
+  padding: 12px 8px;
+  color: #888;
+}
