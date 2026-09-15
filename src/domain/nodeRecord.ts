@@ -1,3 +1,4 @@
+import { Data } from "effect"
 import * as Schema from "effect/Schema"
 
 /**
@@ -10,8 +11,10 @@ export const NodeTypeSchema = Schema.Literals([
   "h2",
   "h3",
   "paragraph",
-  "quote",
   "todo",
+  "quote",
+  "code",
+  "divider",
 ])
 
 /** Lexical JSON 子集 Schema（静态 renderer 接受的格式，超出子集丢样式不丢内容）。 */
@@ -79,6 +82,8 @@ export const LexicalContentSchema = Schema.Struct({
   root: LexicalRootSchema,
 })
 
+export type NodeType = Schema.Schema.Type<typeof NodeTypeSchema>
+
 export type LexicalContent = Schema.Schema.Type<typeof LexicalContentSchema>
 export type BlockNode = Schema.Schema.Type<typeof BlockNodeSchema>
 export type InlineNode = Schema.Schema.Type<typeof InlineNodeSchema>
@@ -107,9 +112,19 @@ export type NodeRecord = Schema.Schema.Type<typeof NodeRecordSchema>
 export const isTombstoned = (node: NodeRecord): boolean =>
   node.tombstonedAt !== undefined
 
-/** 从 Lexical JSON 提取纯文本（含链接子树）。 */
-export const lexicalToText = (content: LexicalContent): string =>
-  content.root.children
+/**
+ * 非 LexicalContent 形状（§16 malformedContent）。
+ * 在 nodeRecord 层定义以避免 invariants ←→ nodeRecord 循环依赖；
+ * invariants 的 ValidationError 用同一 kind 字符串，#4 Worker 层按 kind 归类。
+ */
+export class LexicalContentError extends Data.TaggedError("LexicalContentError") {}
+
+/** 从 Lexical JSON 提取纯文本（含链接子树）。非 LexicalContent 形状抛 ValidationError（§16）。 */
+export const lexicalToText = (content: LexicalContent): string => {
+  if (!Schema.is(LexicalContentSchema)(content)) {
+    throw new LexicalContentError()
+  }
+  return content.root.children
     .map((block: BlockNode | InlineNode) => {
       if ("children" in block) {
         return (block.children as InlineNode[])
@@ -119,6 +134,7 @@ export const lexicalToText = (content: LexicalContent): string =>
       return inlineTextOf(block)
     })
     .join("\n")
+}
 
 const inlineTextOf = (node: InlineNode): string =>
   "text" in node
